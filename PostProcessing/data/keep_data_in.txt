@@ -1,0 +1,15 @@
+# this is a comment
+drop *
+
+#keep objects
+keep Muon_*
+keep Electron_*
+keep Jet_*
+keep PuppiMET_*
+keep PPSLocalTrack_*
+keep PV_*
+keep HLT_Mu15
+keep HLT_PFJet80_L1Jet60
+keep HLT_PFJet40_L1Jet35
+keep HLT_PFJet110
+

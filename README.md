@@ -13,8 +13,30 @@ A comprehensive framework for analysis in CMS that use PPS, covering Run 2 and R
 - `Analysis/`: RDataFrame-based plotting and Poisson fitting logic.
 
 ## Setup
+> **Note**: This framework requires specific track-multiplicity variables (`nTrkPV05`, `nTrkPV09`) currently available in customized NanoAOD. See the merge request here: [LINK_TO_CMSSW_PULL_REQUEST_PLACEHOLDER]
+
+## Setup
 ```bash
 cmsrel CMSSW_16_0_4
 cd CMSSW_16_0_4/src
 cmsenv
 git clone [https://github.com/michael-pitt/CMS-PPS-Analysis.git](https://github.com/michael-pitt/CMS-PPS-Analysis.git)
+```
+
+## How to Run Production
+### Local test
+
+Before submitting to the batch, verify the module logic with a single file:
+
+```bash
+nano_postproc.py ./output_dir /path/to/input/nano.root \
+    -I CMS_PPS_Analysis.PostProcessing.modules.Asymmetry asymmetry_mu \
+    -c "HLT_Mu15 == 1" \
+    --bi $CMSSW_BASE/src/CMS_PPS_Analysis/PostProcessing/data/keep_data_in.txt \
+    --bo $CMSSW_BASE/src/CMS_PPS_Analysis/PostProcessing/data/keep_and_drop_Data_out.txt \
+    -s _Asym
+```
+
+### Batch submission (HTCondor)
+
+PLACEHOLDER FOR THE INSTRUCTIONS
