@@ -9,11 +9,10 @@ A comprehensive framework for analysis in CMS that use PPS, covering Run 2 and R
 
 ## Repository Structure
 - `PostProcessing/`: NanoAODTools modules for physics object enrichment.
-- `Common/`: Era-dependent constants and calibration managers.
 - `Analysis/`: RDataFrame-based plotting and Poisson fitting logic.
 
 ## Setup
-> **Note**: This framework requires specific track-multiplicity variables (`nTrkPV05`, `nTrkPV09`) currently available in customized NanoAOD. See the merge request here: [LINK_TO_CMSSW_PULL_REQUEST_PLACEHOLDER]
+**Note**: This framework requires specific track-multiplicity variables (`nTrkPV05`, `nTrkPV09`) currently available in customized NanoAOD. See the merge request here: [LINK_TO_CMSSW_PULL_REQUEST_PLACEHOLDER]
 
 ## Setup
 ```bash
