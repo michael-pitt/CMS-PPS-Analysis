@@ -20,7 +20,8 @@ A comprehensive framework for analysis in CMS that use PPS, covering Run 2 and R
 cmsrel CMSSW_16_0_4
 cd CMSSW_16_0_4/src
 cmsenv
-git clone [https://github.com/michael-pitt/CMS-PPS-Analysis.git](https://github.com/michael-pitt/CMS-PPS-Analysis.git)
+git clone https://github.com/michael-pitt/CMS_PPS_Analysis.git
+scram b -j
 ```
 
 ## How to Run Production
@@ -29,7 +30,7 @@ git clone [https://github.com/michael-pitt/CMS-PPS-Analysis.git](https://github.
 Before submitting to the batch, verify the module logic with a single file:
 
 ```bash
-nano_postproc.py ./output_dir /path/to/input/nano.root \
+nano_postproc.py ./output_dir /eos/cms/store/group/phys_diffraction/CMSLowPU2026/PilotRun/Muon2/Run401866/Muon2_401866_2f4bd762-a9e9-4661-95c7-69d08dec9a17.root \
     -I CMS_PPS_Analysis.PostProcessing.modules.Asymmetry asymmetry_mu \
     -c "HLT_Mu15 == 1" \
     --bi $CMSSW_BASE/src/CMS_PPS_Analysis/PostProcessing/data/keep_data_in.txt \
