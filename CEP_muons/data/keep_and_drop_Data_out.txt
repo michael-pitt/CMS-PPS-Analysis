@@ -1,0 +1,12 @@
+# this is a comment
+drop *
+
+#keep nanoAOD content
+keep HLT_Mu15
+keep HLT_PFJet80_L1Jet60
+keep HLT_PFJet40_L1Jet35
+keep HLT_PFJet110
+
+#keep branches created by the module
+keep nano_*
+
