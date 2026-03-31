@@ -6,12 +6,18 @@ ROOT.PyConfig.IgnoreCommandLineOptions = True
 from PhysicsTools.NanoAODTools.postprocessing.framework.eventloop import Module
 from PhysicsTools.NanoAODTools.postprocessing.framework.datamodel import Collection
 
+# --- Define here the helpers ---
+def deltaR(obj1, obj2):
+  deta = obj1.eta - obj2.eta
+  dphi = ROOT.TVector2.Phi_mpi_pi(obj1.phi - obj2.phi)
+  return math.hypot(deta, dphi)
+
 class AsymmetryModule(Module):
     def __init__(self, channel="mu", year=2026):
         self.channel = channel
         self.year = year
         self.rp_ids = {"45": [3, 23], "56": [103, 123]}
-
+        
     def beginFile(self, inputFile, outputFile, inputTree, wrappedOutputTree):
         self.out = wrappedOutputTree
         
@@ -55,60 +61,112 @@ class AsymmetryModule(Module):
         self.out.branch("nano_ptll", "F")
 
     def analyze(self, event):
-           
-        # 1. Load Collections
+       
+        # Load Collections
         muons = Collection(event, "Muon")
         electrons = Collection(event, "Electron")
         jets = Collection(event, "Jet")
-        protons = Collection(event, "PPSLocalTrack") # Access tracks for x, y for now
+        protons = Collection(event, "PPSLocalTrack")
+               
+        # Object Selections & IDs
+        # ----------------------------------------------------------------------
+        # Muons: Loose (for ZCR/veto) and Tight (for WCR)
+        loose_mu = [m for m in muons if m.pt > 15 and abs(m.eta) < 2.5 and m.looseId]
+        tight_mu = [m for m in loose_mu if m.pt > 15 and m.tightId and m.pfRelIso04_all < 0.15]
         
-        # 2. Basic Selections
-        
-        sel_mu = [m for m in muons if m.pt > 15 and abs(m.eta) < 2.4 and m.looseId]
-        
-        sel_el = [e for e in electrons if e.pt > 15 and abs(e.eta) < 2.5]
-        
-        sel_jets = [j for j in jets if j.pt > 25 and abs(j.eta) < 4.7]
+        # Electrons: Loose (cutBased=2) and Tight (cutBased=4)
+        loose_el = [e for e in electrons if e.pt > 15 and abs(e.eta) < 2.5 and e.cutBased >= 2]
+        tight_el = [e for e in loose_el if e.pt > 15  and abs(e.eta) < 2.5 and e.cutBased >= 4]
+
+        # Combine and sort by pT
+        loose_leps = sorted(loose_mu + loose_el, key=lambda x: x.pt, reverse=True)
+        tight_leps = sorted(tight_mu + tight_el, key=lambda x: x.pt, reverse=True)
+
+        # Object Overlap Removal (Jets vs Leptons)
+        # ----------------------------------------------------------------------
+        # Remove jets that fall within dR < 0.4 of any loose lepton
+        raw_jets = [j for j in jets if j.pt > 25 and abs(j.eta) < 4.7]
+        sel_jets = []
+        for j in raw_jets:
+            has_overlap = False
+            for l in loose_leps:
+                if deltaR(j, l) < 0.4:
+                    has_overlap = True
+                    break
+            if not has_overlap:
+                sel_jets.append(j)
 
         jet_sum = ROOT.TLorentzVector()
         for j in sel_jets: jet_sum += j.p4()
 
-        # 3. Event filtering
+        # Event Overlap Removal & Signal Region Definitions
+        # ----------------------------------------------------------------------
+        # By using strict elif conditions based on lepton multiplicity, 
+        # events are forced into ONE region exclusively.
+        
+        is_ZCR = False
+        is_WCR = False
+        is_mj = False
+        leptons_to_save = []
+
+        # DY: Exactly 2 loose leptons, opposite sign, same flavor
+        if len(loose_leps) == 2 and loose_leps[0].charge != loose_leps[1].charge and loose_leps[0].pdgId == -loose_leps[1].pdgId:
+            is_ZCR = True
+            leptons_to_save = loose_leps
+            
+        # W+jets: Exactly 1 tight lepton, AND exactly 1 loose lepton (vetoes events with a 2nd loose lepton)
+        elif len(tight_leps) == 1 and len(loose_leps) == 1:
+            is_WCR = True
+            leptons_to_save = tight_leps
+            
+        # MJ Control Region: >= 2 isolated jets, strictly 0 loose leptons
+        elif len(sel_jets) >= 2 and len(loose_leps) == 0:
+            is_mj = True
+            leptons_to_save = []
+
+        # 5. Event Filtering based on Channel
+        # ----------------------------------------------------------------------
         if self.channel == "mu":
-            if len(sel_mu) == 0: return False
-            leptons = sel_mu
+            # Only keep Muon WCR or ZCR
+            if not (is_ZCR or is_WCR): return False
+            if abs(leptons_to_save[0].pdgId) != 13: return False
+            
         elif self.channel == "el":
-            if len(sel_el) == 0: return False
-            leptons = sel_el
+            # Only keep Electron WCR or ZCR
+            if not (is_ZCR or is_WCR): return False
+            if abs(leptons_to_save[0].pdgId) != 11: return False
+            
         elif self.channel == "mj":
-            if len(sel_jets) < 2: return False
-            leptons = sel_mu
+            if not is_mj: return False
+            
         elif self.channel == "zb":
-            leptons = sel_mu + sel_el # Save everything
+            # Save everything
+            leptons_to_save = loose_leps
+            
         else:
             return False
 
-        # 4. Calculations: Dileptons & W variables
+        # Calculations: Dileptons & W variables
+        # ----------------------------------------------------------------------
         mll = yll = ptll = -1.0
         w_mT = w_pt = w_phi = -1.0
         
-        if len(leptons) >= 2:
-            dilep = leptons[0].p4() + leptons[1].p4()
+        if len(leptons_to_save) >= 2:
+            dilep = leptons_to_save[0].p4() + leptons_to_save[1].p4()
             mll, yll, ptll = dilep.M(), dilep.Rapidity(), dilep.Pt()
             
-        if len(leptons) >= 1:
-            # Transverse Mass calculation using MET
+        if len(leptons_to_save) >= 1:
             met_pt = event.PuppiMET_pt
             met_phi = event.PuppiMET_phi
-            dphi = ROOT.TVector2.Phi_mpi_pi(leptons[0].phi - met_phi)
-            w_mT = math.sqrt(2 * leptons[0].pt * met_pt * (1 - math.cos(dphi)))
+            dphi = ROOT.TVector2.Phi_mpi_pi(leptons_to_save[0].phi - met_phi)
+            w_mT = math.sqrt(2 * leptons_to_save[0].pt * met_pt * (1 - math.cos(dphi)))
             
-            # W Vector
-            w_vec = ROOT.TVector2(leptons[0].pt * math.cos(leptons[0].phi) + met_pt * math.cos(met_phi),
-                                  leptons[0].pt * math.sin(leptons[0].phi) + met_pt * math.sin(met_phi))
+            w_vec = ROOT.TVector2(leptons_to_save[0].pt * math.cos(leptons_to_save[0].phi) + met_pt * math.cos(met_phi),
+                                  leptons_to_save[0].pt * math.sin(leptons_to_save[0].phi) + met_pt * math.sin(met_phi))
             w_pt, w_phi = w_vec.Mod(), w_vec.Phi()
 
-        # 5. Protons Logic (LocalTrack mapping)
+        
+        # Protons Logic (LocalTrack mapping)
         pps_arm = []
         pps_rpid = []
         pps_x = []
@@ -121,7 +179,8 @@ class AsymmetryModule(Module):
             pps_x.append(p.x)
             pps_y.append(p.y)
 
-        # 6. TRACK MULTIPLICITIES & MPI LOGIC
+        
+        # TRACK MULTIPLICITIES & MPI LOGIC
         nPV = getattr(event, "PV_npvs", 0) # Standard NanoAOD branch
         
         # Read PV0 tracks (assuming FlatTable extended the PV collection)
@@ -133,8 +192,8 @@ class AsymmetryModule(Module):
         jet_trk05 = [getattr(j, "ntrk0p5", 0) for j in sel_jets]
         jet_trk09 = [getattr(j, "ntrk0p9", 0) for j in sel_jets]
         
-        lep_trk05 = [getattr(l, "ntrk0p5", 0) for l in leptons]
-        lep_trk09 = [getattr(l, "ntrk0p9", 0) for l in leptons]
+        lep_trk05 = [getattr(l, "ntrk0p5", 0) for l in leptons_to_save]
+        lep_trk09 = [getattr(l, "ntrk0p9", 0) for l in leptons_to_save]
         
         # N_trk^MPI = N_trk^PV - Sum(N_trk^objects)
         nmpi05 = pv0_ntrk05 - sum(jet_trk05) - sum(lep_trk05)
@@ -166,11 +225,11 @@ class AsymmetryModule(Module):
         self.out.fillBranch("nano_mJets", jet_sum.M())
         self.out.fillBranch("nano_yJets", jet_sum.Rapidity())
 
-        self.out.fillBranch("nano_nLeptons", len(leptons))
-        self.out.fillBranch("nano_lep_pt", [l.pt for l in leptons])
-        self.out.fillBranch("nano_lep_eta", [l.eta for l in leptons])
-        self.out.fillBranch("nano_lep_phi", [l.phi for l in leptons])
-        self.out.fillBranch("nano_lep_charge", [l.charge for l in leptons])
+        self.out.fillBranch("nano_nLeptons", len(leptons_to_save))
+        self.out.fillBranch("nano_lep_pt", [l.pt for l in leptons_to_save])
+        self.out.fillBranch("nano_lep_eta", [l.eta for l in leptons_to_save])
+        self.out.fillBranch("nano_lep_phi", [l.phi for l in leptons_to_save])
+        self.out.fillBranch("nano_lep_charge", [l.charge for l in leptons_to_save])
         self.out.fillBranch("nano_lep_ntrk05", lep_trk05)
         self.out.fillBranch("nano_lep_ntrk09", lep_trk09)
         self.out.fillBranch("nano_mll", mll)
