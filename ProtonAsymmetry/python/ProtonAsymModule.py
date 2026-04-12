@@ -11,6 +11,34 @@ def deltaR(obj1, obj2):
   deta = obj1.eta - obj2.eta
   dphi = ROOT.TVector2.Phi_mpi_pi(obj1.phi - obj2.phi)
   return math.hypot(deta, dphi)
+  
+def get_nu_p4(lep_vec, met_pt, met_phi):
+    """Reconstructs the neutrino 4-vector using the W mass constraint."""
+    MW = 80.379
+    px_nu = met_pt * math.cos(met_phi)
+    py_nu = met_pt * math.sin(met_phi)
+
+    Lambda = (MW**2) / 2.0 + lep_vec.Px() * px_nu + lep_vec.Py() * py_nu
+    A = lep_vec.Pt()**2
+    B = -2.0 * Lambda * lep_vec.Pz()
+    C = (lep_vec.E()**2) * (met_pt**2) - Lambda**2
+
+    delta = B**2 - 4 * A * C
+
+    # Solve the quadratic equation for pz
+    if delta >= 0:
+        pz1 = (-B + math.sqrt(delta)) / (2.0 * A)
+        pz2 = (-B - math.sqrt(delta)) / (2.0 * A)
+        # Take the solution with the smallest absolute value
+        pz_nu = pz1 if abs(pz1) < abs(pz2) else pz2
+    else:
+        # If complex, take the real part
+        pz_nu = -B / (2.0 * A)
+
+    nu_vec = ROOT.TLorentzVector()
+    e_nu = math.sqrt(met_pt**2 + pz_nu**2)
+    nu_vec.SetPxPyPzE(px_nu, py_nu, pz_nu, e_nu)
+    return nu_vec  
 
 class AsymmetryModule(Module):
     def __init__(self, channel="mu", year=2026):
@@ -56,9 +84,15 @@ class AsymmetryModule(Module):
         self.out.branch("nano_w_mT", "F")
         self.out.branch("nano_w_pt", "F")
         self.out.branch("nano_w_phi", "F")
+        self.out.branch("nano_w_y", "F")
+        self.out.branch("nano_w_m", "F")
         self.out.branch("nano_mll", "F")
         self.out.branch("nano_yll", "F")
         self.out.branch("nano_ptll", "F")
+        
+        # event branches
+        self.out.branch("nano_Mall", "F")
+        self.out.branch("nano_Yall", "F")
 
     def analyze(self, event):
        
@@ -149,11 +183,20 @@ class AsymmetryModule(Module):
         # Calculations: Dileptons & W variables
         # ----------------------------------------------------------------------
         mll = yll = ptll = -1.0
-        w_mT = w_pt = w_phi = -1.0
+        w_mT = w_pt = w_phi = w_y = w_m = -1.0
+        Mall = Yall = -999.0
+        
+        v_all = ROOT.TLorentzVector()
+        
+        # 1. Add all jets to the global system
+        for j in sel_jets:
+            v_all += j.p4()
         
         if len(leptons_to_save) >= 2:
             dilep = leptons_to_save[0].p4() + leptons_to_save[1].p4()
             mll, yll, ptll = dilep.M(), dilep.Rapidity(), dilep.Pt()
+            v_all += leptons_to_save[0].p4()
+            v_all += leptons_to_save[1].p4()
             
         if len(leptons_to_save) >= 1:
             met_pt = event.PuppiMET_pt
@@ -164,6 +207,27 @@ class AsymmetryModule(Module):
             w_vec = ROOT.TVector2(leptons_to_save[0].pt * math.cos(leptons_to_save[0].phi) + met_pt * math.cos(met_phi),
                                   leptons_to_save[0].pt * math.sin(leptons_to_save[0].phi) + met_pt * math.sin(met_phi))
             w_pt, w_phi = w_vec.Mod(), w_vec.Phi()
+            
+            # Full reconstruction using W mass constraint
+            lep_p4 = ROOT.TLorentzVector()
+            lep_p4.SetPtEtaPhiM(leptons_to_save[0].pt, leptons_to_save[0].eta, leptons_to_save[0].phi, leptons_to_save[0].mass)
+            nu_p4 = get_nu_p4(lep_p4, met_pt, met_phi)
+            w_p4 = lep_p4 + nu_p4
+            w_pt, w_phi = w_p4.Pt(), w_p4.Phi()
+            w_y, w_m = w_p4.Rapidity(), w_p4.M()
+            
+            v_all += lep_p4
+            v_all += nu_p4
+            
+        elif is_mj or self.channel == "zb":
+            for l in leptons_to_save:
+                v_all += l.p4()
+                
+        # Calculate Global Variables
+        if v_all.E() > 0:
+            Mall = v_all.M()
+            if v_all.E() > abs(v_all.Pz()): # Protection for rapidity calculation
+                Yall = v_all.Rapidity()
 
         
         # Protons Logic (LocalTrack mapping)
@@ -236,6 +300,11 @@ class AsymmetryModule(Module):
         self.out.fillBranch("nano_w_mT", w_mT)
         self.out.fillBranch("nano_w_pt", w_pt)
         self.out.fillBranch("nano_w_phi", w_phi)
+        self.out.fillBranch("nano_w_y", w_y)
+        self.out.fillBranch("nano_w_m", w_m)
+        
+        self.out.fillBranch("nano_Mall", Mall)
+        self.out.fillBranch("nano_Yall", Yall)
 
         return True
 

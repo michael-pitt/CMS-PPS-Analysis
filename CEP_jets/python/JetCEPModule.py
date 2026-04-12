@@ -24,7 +24,8 @@ class JetCEPModule(Module):
         # Event / Pileup Summaries
         self.out.branch("nano_nPV", "I")
         self.out.branch("nano_PV0_ntrk05", "I") # nTracks at PV with pT > 0.5
-        self.out.branch("nano_PV0_ntrk09", "I") # nTracks at PV with pT > 0.9    
+        self.out.branch("nano_PV0_ntrk09", "I") # nTracks at PV with pT > 0.9
+        self.out.branch("nano_PV0_z", "F")
         self.out.branch("nano_NMPI05", "I")
         self.out.branch("nano_NMPI09", "I")
         
@@ -34,6 +35,7 @@ class JetCEPModule(Module):
         self.out.branch("nano_pps_rpid", "I", lenVar="nProtons")
         self.out.branch("nano_pps_x", "F", lenVar="nProtons")
         self.out.branch("nano_pps_y", "F", lenVar="nProtons")
+        self.out.branch("nano_pps_t", "F", lenVar="nProtons")
         
         # Jet Summaries
         self.out.branch("nano_nJets", "I")
@@ -69,6 +71,7 @@ class JetCEPModule(Module):
         pps_rpid = []
         pps_x = []
         pps_y = []
+        pps_t = []
         for p in protons:
             # Map decRPId to arm (0 for 45, 1 for 56)
             arm = 0 if p.decRPId < 100 else 1
@@ -76,6 +79,7 @@ class JetCEPModule(Module):
             pps_rpid.append(p.decRPId)
             pps_x.append(p.x)
             pps_y.append(p.y)
+            pps_t.append(p.time)
 
         
        
@@ -98,8 +102,9 @@ class JetCEPModule(Module):
         
         # 7. Fill Branches
         self.out.fillBranch("nano_nPV", getattr(event, "PV_npvsGood", 0))
-        self.out.fillBranch("nano_PV0_ntrk05", getattr(event, "PV_ntrk0p5", 0))
-        self.out.fillBranch("nano_PV0_ntrk09", getattr(event, "PV_ntrk0p9", 0))
+        self.out.fillBranch("nano_PV0_ntrk05", pv0_ntrk05)
+        self.out.fillBranch("nano_PV0_ntrk09", pv0_ntrk09)
+        self.out.fillBranch("nano_PV0_z", getattr(event, "PV_z", 0))
         self.out.fillBranch("nano_NMPI05", nmpi05)
         self.out.fillBranch("nano_NMPI09", nmpi09)
 
@@ -108,6 +113,7 @@ class JetCEPModule(Module):
         self.out.fillBranch("nano_pps_rpid", pps_rpid)
         self.out.fillBranch("nano_pps_x", pps_x)
         self.out.fillBranch("nano_pps_y", pps_y)
+        self.out.fillBranch("nano_pps_t", pps_t)
 
         self.out.fillBranch("nano_nJets", len(sel_jets))
         self.out.fillBranch("nano_jet_pt", [j.pt for j in sel_jets])
