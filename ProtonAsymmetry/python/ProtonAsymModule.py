@@ -28,6 +28,11 @@ JES_VARIATION_SIGNS = {
     "jestotaldown": -1,
 }
 
+JET_PT_10_VARIATION_SIGNS = {
+    "jetpt10up": 1,
+    "jetpt10down": -1,
+}
+
 
 JES_DEFAULTS = {
     2026: {
@@ -38,6 +43,7 @@ JES_DEFAULTS = {
         "uncertainty": "Summer24Prompt26_V1_MC_Total_AK4PFPuppi",
         "jec": "Summer24Prompt26_V1_MC_L1L2L3Res_AK4PFPuppi",
         "l1": "Summer24Prompt26_V1_MC_L1FastJet_AK4PFPuppi",
+        "data_jec": "Summer24Prompt26_V1_DATA_L1L2L3Res_AK4PFPuppi",
     },
 }
 
@@ -54,15 +60,21 @@ def normalize_jes_variation(value):
         "down": "jestotaldown",
         "jesdown": "jestotaldown",
         "totaldown": "jestotaldown",
+        "10up": "jetpt10up",
+        "10down": "jetpt10down",
     }
     key = aliases.get(key, key)
-    if key not in JES_VARIATION_SIGNS:
-        allowed = "nominal, jesTotalUp, jesTotalDown"
+    if key not in JES_VARIATION_SIGNS and key not in JET_PT_10_VARIATION_SIGNS:
+        allowed = (
+            "nominal, jesTotalUp, jesTotalDown, jetPt10Up, jetPt10Down"
+        )
         raise ValueError(f"Unknown JES variation '{value}'. Expected one of: {allowed}.")
     return {
         "nominal": "nominal",
         "jestotalup": "jesTotalUp",
         "jestotaldown": "jesTotalDown",
+        "jetpt10up": "jetPt10Up",
+        "jetpt10down": "jetPt10Down",
     }[key]
 
 
@@ -75,13 +87,15 @@ def shift_jet_pt_mass(pt, mass, uncertainty, variation_sign):
 
 
 class AnalysisJet:
-    def __init__(self, source, pt, eta, phi, mass, jes_uncertainty=0.0):
+    def __init__(self, source, pt, eta, phi, mass, jes_uncertainty=0.0,
+                 central_jec_factor=1.0):
         self.source = source
         self.pt = pt
         self.eta = eta
         self.phi = phi
         self.mass = mass
         self.jes_uncertainty = jes_uncertainty
+        self.central_jec_factor = central_jec_factor
 
         self._p4 = ROOT.TLorentzVector()
         self._p4.SetPtEtaPhiM(pt, eta, phi, mass)
@@ -123,7 +137,8 @@ def get_nu_p4(lep_vec, met_pt, met_phi):
 class AsymmetryModule(Module):
     def __init__(self, channel="mu", year=2026, jes_variation=None,
                  jes_json=None, jes_uncertainty_name=None, jes_jec_name=None,
-                 jes_l1_name=None):
+                 jes_l1_name=None, apply_central_jec=False,
+                 central_jec_name=None):
         self.channel = channel
         self.year = year
         self.rp_ids = {"45": [3, 23], "56": [103, 123]}
@@ -133,9 +148,9 @@ class AsymmetryModule(Module):
             if jes_variation is None else jes_variation
         )
         self.jes_variation = normalize_jes_variation(requested_variation)
-        self.jes_sign = JES_VARIATION_SIGNS[
-            self.jes_variation.replace("_", "").lower()
-        ]
+        variation_key = self.jes_variation.replace("_", "").lower()
+        self.jes_sign = JES_VARIATION_SIGNS.get(variation_key, 0)
+        self.jet_pt10_sign = JET_PT_10_VARIATION_SIGNS.get(variation_key, 0)
         jes_defaults = JES_DEFAULTS.get(int(year), {})
         self.jes_json = jes_json or os.environ.get(
             "PROTON_ASYM_JES_JSON", jes_defaults.get("json", "")
@@ -150,9 +165,15 @@ class AsymmetryModule(Module):
         self.jes_l1_name = jes_l1_name or os.environ.get(
             "PROTON_ASYM_JES_L1_NAME", jes_defaults.get("l1", "")
         )
+        self.apply_central_jec = bool(apply_central_jec)
+        self.central_jec_name = central_jec_name or os.environ.get(
+            "PROTON_ASYM_CENTRAL_JEC_NAME", jes_defaults.get("data_jec", "")
+        )
         self.jes_uncertainty_evaluator = None
         self.jes_jec_evaluator = None
         self.jes_l1_evaluator = None
+        self.central_jec_evaluator = None
+        self._correction_set = None
         
         # --- HARDCODED KINEMATIC PARAMETERS ---
         self.min_muon_pt = 15.0      # For W/Z Control Regions
@@ -163,6 +184,58 @@ class AsymmetryModule(Module):
     @property
     def has_jes_shift(self):
         return self.jes_sign != 0
+
+    @property
+    def has_jet_pt10_shift(self):
+        return self.jet_pt10_sign != 0
+
+    def _load_correction_set(self):
+        if self._correction_set is not None:
+            return self._correction_set
+        if not os.path.isfile(self.jes_json):
+            raise RuntimeError(f"JEC payload does not exist: {self.jes_json}")
+        if self.jes_json.endswith(".gz"):
+            with open(self.jes_json, "rb") as payload:
+                if payload.read(2) != b"\x1f\x8b":
+                    raise RuntimeError(
+                        f"JEC payload is not a gzip file: {self.jes_json}. "
+                        "Check that an HTML login page was not downloaded instead."
+                    )
+
+        try:
+            import correctionlib
+        except ImportError as exc:
+            raise RuntimeError(
+                "JEC requested but correctionlib is not available in this "
+                "CMSSW environment."
+            ) from exc
+
+        self._correction_set = correctionlib.CorrectionSet.from_file(self.jes_json)
+        return self._correction_set
+
+    def _load_central_jec(self):
+        if not self.apply_central_jec:
+            return
+        if not self.jes_json or not self.central_jec_name:
+            raise RuntimeError(
+                "Central JEC application requires PROTON_ASYM_JES_JSON and "
+                "PROTON_ASYM_CENTRAL_JEC_NAME."
+            )
+        cset = self._load_correction_set()
+        try:
+            self.central_jec_evaluator = cset[self.central_jec_name]
+        except (KeyError, IndexError):
+            compound = getattr(cset, "compound", {})
+            try:
+                self.central_jec_evaluator = compound[self.central_jec_name]
+            except (KeyError, IndexError) as exc:
+                raise RuntimeError(
+                    f"Central JEC '{self.central_jec_name}' was not found as "
+                    f"a correction or compound correction in {self.jes_json}."
+                ) from exc
+        print("[ProtonAsymModule] Central data JEC enabled")
+        print(f"[ProtonAsymModule]   JSON: {self.jes_json}")
+        print(f"[ProtonAsymModule]   central JEC: {self.central_jec_name}")
 
     def _load_jes(self):
         if not self.has_jes_shift:
@@ -181,28 +254,10 @@ class AsymmetryModule(Module):
                 "and L1 JECs are needed to recompute Type-1 PUPPI MET."
             )
 
-        if not os.path.isfile(self.jes_json):
-            raise RuntimeError(f"JES payload does not exist: {self.jes_json}")
-        if self.jes_json.endswith(".gz"):
-            with open(self.jes_json, "rb") as payload:
-                if payload.read(2) != b"\x1f\x8b":
-                    raise RuntimeError(
-                        f"JES payload is not a gzip file: {self.jes_json}. "
-                        "Check that an HTML login page was not downloaded instead."
-                    )
-
-        try:
-            import correctionlib
-        except ImportError as exc:
-            raise RuntimeError(
-                "JES requested but correctionlib is not available in this "
-                "CMSSW environment."
-            ) from exc
-
-        cset = correctionlib.CorrectionSet.from_file(self.jes_json)
+        cset = self._load_correction_set()
         try:
             self.jes_uncertainty_evaluator = cset[self.jes_uncertainty_name]
-        except KeyError as exc:
+        except (KeyError, IndexError) as exc:
             raise RuntimeError(
                 f"JES uncertainty correction '{self.jes_uncertainty_name}' "
                 f"was not found in {self.jes_json}."
@@ -210,11 +265,11 @@ class AsymmetryModule(Module):
 
         try:
             self.jes_jec_evaluator = cset[self.jes_jec_name]
-        except KeyError:
+        except (KeyError, IndexError):
             compound = getattr(cset, "compound", {})
             try:
                 self.jes_jec_evaluator = compound[self.jes_jec_name]
-            except KeyError as exc:
+            except (KeyError, IndexError) as exc:
                 raise RuntimeError(
                     f"Nominal JEC correction '{self.jes_jec_name}' was not "
                     f"found as a correction or compound correction in {self.jes_json}."
@@ -222,7 +277,7 @@ class AsymmetryModule(Module):
 
         try:
             self.jes_l1_evaluator = cset[self.jes_l1_name]
-        except KeyError as exc:
+        except (KeyError, IndexError) as exc:
             raise RuntimeError(
                 f"L1 JEC correction '{self.jes_l1_name}' was not found in "
                 f"{self.jes_json}."
@@ -306,9 +361,26 @@ class AsymmetryModule(Module):
         return uncertainty
 
     def _analysis_jet(self, jet, event):
-        uncertainty = self._jes_uncertainty(jet, event, jet.pt)
+        central_pt, central_mass, central_factor = self._central_jet_pt_mass(
+            jet, event
+        )
+        if self.has_jet_pt10_shift:
+            pt, mass = shift_jet_pt_mass(
+                central_pt, central_mass, 0.10, self.jet_pt10_sign
+            )
+            return AnalysisJet(
+                jet,
+                pt,
+                jet.eta,
+                jet.phi,
+                mass,
+                jes_uncertainty=0.0,
+                central_jec_factor=central_factor,
+            )
+
+        uncertainty = self._jes_uncertainty(jet, event, central_pt)
         pt, mass = shift_jet_pt_mass(
-            jet.pt, jet.mass, uncertainty, self.jes_sign
+            central_pt, central_mass, uncertainty, self.jes_sign
         )
 
         return AnalysisJet(
@@ -318,7 +390,34 @@ class AsymmetryModule(Module):
             jet.phi,
             mass,
             jes_uncertainty=uncertainty,
+            central_jec_factor=central_factor,
         )
+
+    def _central_jet_pt_mass(self, jet, event):
+        """Undo the stored JEC and apply the selected central DATA JEC."""
+        if not self.apply_central_jec:
+            return jet.pt, jet.mass, 1.0
+        raw_factor = safe_get(jet, "rawFactor", None)
+        if raw_factor is None:
+            raise RuntimeError(
+                "Central JEC application requires Jet_rawFactor."
+            )
+        raw_scale = 1.0 - raw_factor
+        if not math.isfinite(raw_scale) or raw_scale <= 0.0:
+            raise RuntimeError(
+                f"Invalid Jet_rawFactor {raw_factor} for jet pt={jet.pt}."
+            )
+        raw_pt = jet.pt * raw_scale
+        raw_mass = jet.mass * raw_scale
+        factor = float(
+            self._evaluate(self.central_jec_evaluator, jet, event, raw_pt, raw_mass)
+        )
+        if not math.isfinite(factor) or factor <= 0.0:
+            raise RuntimeError(
+                f"Invalid central JEC factor {factor} for raw jet "
+                f"(pt={raw_pt}, eta={jet.eta})."
+            )
+        return raw_pt * factor, raw_mass * factor, factor
 
     def _type1_corrected_pts(self, jet, event, raw_pt, em_fraction):
         """Return the L1 and JES-varied pT used by the Type-1 MET recipe."""
@@ -425,6 +524,7 @@ class AsymmetryModule(Module):
 
     def beginFile(self, inputFile, outputFile, inputTree, wrappedOutputTree):
         self.out = wrappedOutputTree
+        self._load_central_jec()
         self._load_jes()
         
         # MPI Summaries 
@@ -444,6 +544,7 @@ class AsymmetryModule(Module):
         self.out.branch("nano_jet_eta", "F", lenVar="nano_nJets")
         self.out.branch("nano_jet_phi", "F", lenVar="nano_nJets")
         self.out.branch("nano_jet_jesUncertainty", "F", lenVar="nano_nJets")
+        self.out.branch("nano_jet_centralJecFactor", "F", lenVar="nano_nJets")
         self.out.branch("nano_Jet_ntrk05", "I", lenVar="nano_nJets")
         self.out.branch("nano_Jet_ntrk09", "I", lenVar="nano_nJets")
         self.out.branch("nano_mJets", "F")
@@ -471,6 +572,8 @@ class AsymmetryModule(Module):
         
         # event branches
         self.out.branch("nano_jesVariation", "I")
+        self.out.branch("nano_jetPt10Variation", "I")
+        self.out.branch("nano_jecApplied", "O")
         self.out.branch("nano_puppiMET_pt", "F")
         self.out.branch("nano_puppiMET_phi", "F")
         self.out.branch("nano_Mall", "F")
@@ -699,6 +802,10 @@ class AsymmetryModule(Module):
             "nano_jet_jesUncertainty",
             [j.jes_uncertainty for j in sel_jets],
         )
+        self.out.fillBranch(
+            "nano_jet_centralJecFactor",
+            [j.central_jec_factor for j in sel_jets],
+        )
         self.out.fillBranch("nano_Jet_ntrk05", jet_trk05)
         self.out.fillBranch("nano_Jet_ntrk09", jet_trk09)
         self.out.fillBranch("nano_mJets", jet_sum.M() if len(sel_jets) > 0 else -999.0)
@@ -724,6 +831,8 @@ class AsymmetryModule(Module):
         self.out.fillBranch("nano_w_m", w_m)
 
         self.out.fillBranch("nano_jesVariation", self.jes_sign)
+        self.out.fillBranch("nano_jetPt10Variation", self.jet_pt10_sign)
+        self.out.fillBranch("nano_jecApplied", self.apply_central_jec)
         self.out.fillBranch("nano_puppiMET_pt", analysis_met_pt)
         self.out.fillBranch("nano_puppiMET_phi", analysis_met_phi)
         self.out.fillBranch("nano_Mall", Mall)
@@ -743,8 +852,12 @@ class AsymmetryModule(Module):
         outputFile.cd()
         self.h_cutflow.Write()
 
-def _asymmetry_factory(channel, variation):
-    return lambda: AsymmetryModule(channel=channel, jes_variation=variation)
+def _asymmetry_factory(channel, variation, apply_central_jec=False):
+    return lambda: AsymmetryModule(
+        channel=channel,
+        jes_variation=variation,
+        apply_central_jec=apply_central_jec,
+    )
 
 
 # Nominal factories preserve the existing nano_postproc.py interface.
@@ -752,7 +865,8 @@ asymmetry_mu     = _asymmetry_factory("mu", "nominal")
 asymmetry_dimuon = _asymmetry_factory("dimuon", "nominal")
 asymmetry_softmm = _asymmetry_factory("softmm", "nominal")
 asymmetry_el     = _asymmetry_factory("el", "nominal")
-asymmetry_mj     = _asymmetry_factory("mj", "nominal")
+asymmetry_mj     = _asymmetry_factory("mj", "nominal", apply_central_jec=True)
+asymmetry_mj_promptReco = _asymmetry_factory("mj", "nominal")
 asymmetry_zb     = _asymmetry_factory("zb", "nominal")
 
 # Explicit factories make the three production passes reproducible without
@@ -767,5 +881,11 @@ asymmetry_el_jesTotalUp         = _asymmetry_factory("el", "jesTotalUp")
 asymmetry_el_jesTotalDown       = _asymmetry_factory("el", "jesTotalDown")
 asymmetry_mj_jesTotalUp         = _asymmetry_factory("mj", "jesTotalUp")
 asymmetry_mj_jesTotalDown       = _asymmetry_factory("mj", "jesTotalDown")
+asymmetry_mj_jetPt10Up          = _asymmetry_factory(
+    "mj", "jetPt10Up", apply_central_jec=True
+)
+asymmetry_mj_jetPt10Down        = _asymmetry_factory(
+    "mj", "jetPt10Down", apply_central_jec=True
+)
 asymmetry_zb_jesTotalUp         = _asymmetry_factory("zb", "jesTotalUp")
 asymmetry_zb_jesTotalDown       = _asymmetry_factory("zb", "jesTotalDown")
