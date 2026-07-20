@@ -1,6 +1,8 @@
 drop *
 
 #keep nanoAOD content
+keep run
+keep event
 keep bunchCrossing
 keep crossingAngle
 keep betaStar*

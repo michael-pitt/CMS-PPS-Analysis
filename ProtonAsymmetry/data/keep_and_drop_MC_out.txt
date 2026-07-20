@@ -2,6 +2,9 @@
 drop *
 
 #keep nanoAOD content
+keep run
+keep luminosityBlock
+keep event
 keep PV_*
 keep OtherPV_*
 keep nGenProton

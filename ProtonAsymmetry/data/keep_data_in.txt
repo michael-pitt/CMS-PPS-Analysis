@@ -4,12 +4,17 @@ drop *
 keep Muon_*
 keep Electron_*
 keep Jet_*
+keep nCorrT1METJet
+keep CorrT1METJet_*
 keep PuppiMET_*
 keep PPSLocalTrack_*
 keep PV_*
 keep OtherPV_*
+keep fixedGridRhoFastjetAll
 
 # keep LHC info
+keep run
+keep event
 keep bunchCrossing
 keep crossingAngle
 keep betaStar*
