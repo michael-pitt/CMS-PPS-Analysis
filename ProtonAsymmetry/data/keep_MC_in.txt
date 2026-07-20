@@ -8,10 +8,11 @@ keep Jet_*
 keep nCorrT1METJet
 keep CorrT1METJet_*
 keep PuppiMET_*
+keep RawPuppiMET_*
 keep PPSLocalTrack_*
 keep PV_*
 keep OtherPV_*
-keep fixedGridRhoFastjetAll
+keep Rho_fixedGridRhoFastjetAll
 keep run
 keep luminosityBlock
 keep event

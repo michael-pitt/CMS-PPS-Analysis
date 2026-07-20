@@ -29,6 +29,19 @@ JES_VARIATION_SIGNS = {
 }
 
 
+JES_DEFAULTS = {
+    2026: {
+        "json": (
+            "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/"
+            "Run3-26Prompt-Summer24-NanoAODv15/2026-07-15/jet_jerc.json.gz"
+        ),
+        "uncertainty": "Summer24Prompt26_V1_MC_Total_AK4PFPuppi",
+        "jec": "Summer24Prompt26_V1_MC_L1L2L3Res_AK4PFPuppi",
+        "l1": "Summer24Prompt26_V1_MC_L1FastJet_AK4PFPuppi",
+    },
+}
+
+
 def normalize_jes_variation(value):
     """Return the canonical name used by the three JES production passes."""
     key = str(value or "nominal").strip().replace("_", "").lower()
@@ -109,7 +122,8 @@ def get_nu_p4(lep_vec, met_pt, met_phi):
 
 class AsymmetryModule(Module):
     def __init__(self, channel="mu", year=2026, jes_variation=None,
-                 jes_json=None, jes_uncertainty_name=None, jes_jec_name=None):
+                 jes_json=None, jes_uncertainty_name=None, jes_jec_name=None,
+                 jes_l1_name=None):
         self.channel = channel
         self.year = year
         self.rp_ids = {"45": [3, 23], "56": [103, 123]}
@@ -122,15 +136,23 @@ class AsymmetryModule(Module):
         self.jes_sign = JES_VARIATION_SIGNS[
             self.jes_variation.replace("_", "").lower()
         ]
-        self.jes_json = jes_json or os.environ.get("PROTON_ASYM_JES_JSON", "")
+        jes_defaults = JES_DEFAULTS.get(int(year), {})
+        self.jes_json = jes_json or os.environ.get(
+            "PROTON_ASYM_JES_JSON", jes_defaults.get("json", "")
+        )
         self.jes_uncertainty_name = jes_uncertainty_name or os.environ.get(
-            "PROTON_ASYM_JES_UNCERTAINTY_NAME", ""
+            "PROTON_ASYM_JES_UNCERTAINTY_NAME",
+            jes_defaults.get("uncertainty", ""),
         )
         self.jes_jec_name = jes_jec_name or os.environ.get(
-            "PROTON_ASYM_JES_JEC_NAME", ""
+            "PROTON_ASYM_JES_JEC_NAME", jes_defaults.get("jec", "")
+        )
+        self.jes_l1_name = jes_l1_name or os.environ.get(
+            "PROTON_ASYM_JES_L1_NAME", jes_defaults.get("l1", "")
         )
         self.jes_uncertainty_evaluator = None
         self.jes_jec_evaluator = None
+        self.jes_l1_evaluator = None
         
         # --- HARDCODED KINEMATIC PARAMETERS ---
         self.min_muon_pt = 15.0      # For W/Z Control Regions
@@ -145,13 +167,18 @@ class AsymmetryModule(Module):
     def _load_jes(self):
         if not self.has_jes_shift:
             return
-        if not self.jes_json or not self.jes_uncertainty_name or not self.jes_jec_name:
+        if (
+            not self.jes_json
+            or not self.jes_uncertainty_name
+            or not self.jes_jec_name
+            or not self.jes_l1_name
+        ):
             raise RuntimeError(
                 "A non-nominal JES pass requires PROTON_ASYM_JES_JSON, "
                 "PROTON_ASYM_JES_UNCERTAINTY_NAME, and "
-                "PROTON_ASYM_JES_JEC_NAME. The uncertainty correction supplies "
-                "delta_JES; the nominal compound JEC is needed for low-pT "
-                "CorrT1METJet objects in the Type-1 PUPPI MET propagation."
+                "PROTON_ASYM_JES_JEC_NAME plus PROTON_ASYM_JES_L1_NAME. "
+                "The uncertainty correction supplies delta_JES; the nominal "
+                "and L1 JECs are needed to recompute Type-1 PUPPI MET."
             )
 
         if not os.path.isfile(self.jes_json):
@@ -193,6 +220,14 @@ class AsymmetryModule(Module):
                     f"found as a correction or compound correction in {self.jes_json}."
                 ) from exc
 
+        try:
+            self.jes_l1_evaluator = cset[self.jes_l1_name]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"L1 JEC correction '{self.jes_l1_name}' was not found in "
+                f"{self.jes_json}."
+            ) from exc
+
         print("[ProtonAsymModule] JES systematic enabled")
         print(f"[ProtonAsymModule]   variation: {self.jes_variation}")
         print(f"[ProtonAsymModule]   JSON: {self.jes_json}")
@@ -201,6 +236,7 @@ class AsymmetryModule(Module):
             f"{self.jes_uncertainty_name}"
         )
         print(f"[ProtonAsymModule]   nominal JEC: {self.jes_jec_name}")
+        print(f"[ProtonAsymModule]   L1 JEC: {self.jes_l1_name}")
 
     def _correction_input_value(self, input_info, obj, event, pt, mass=0.0):
         name = input_info.name
@@ -227,11 +263,14 @@ class AsymmetryModule(Module):
                 raise RuntimeError(f"Correction input '{name}' requires jet area.")
             return area
         if key == "rho":
-            rho = safe_get(event, "fixedGridRhoFastjetAll", None)
+            rho = safe_get(event, "Rho_fixedGridRhoFastjetAll", None)
+            if rho is None:
+                # Compatibility with NanoAOD versions predating the Rho_ table.
+                rho = safe_get(event, "fixedGridRhoFastjetAll", None)
             if rho is None:
                 raise RuntimeError(
-                    "Correction requires fixedGridRhoFastjetAll, but the branch "
-                    "is missing from the input selection."
+                    "Correction requires Rho_fixedGridRhoFastjetAll, but the "
+                    "branch is missing from the input selection."
                 )
             return rho
         if key == "run":
@@ -281,53 +320,71 @@ class AsymmetryModule(Module):
             jes_uncertainty=uncertainty,
         )
 
-    def _stored_jet_type1_pt(self, jet):
-        """Return the nominal Type-1 jet pT and its MET eligibility.
-
-        The 15 GeV threshold is applied after removing the raw muon component,
-        matching the NanoAODTools Type-1 MET recipe.
-        """
-        raw_factor = safe_get(jet, "rawFactor", None)
+    def _type1_corrected_pts(self, jet, event, raw_pt, em_fraction):
+        """Return the L1 and JES-varied pT used by the Type-1 MET recipe."""
+        area = safe_get(jet, "area", None)
         muon_subtr = safe_get(jet, "muonSubtrFactor", None)
+        if area is None or muon_subtr is None:
+            raise RuntimeError(
+                "Type-1 MET propagation requires jet area and "
+                "muonSubtrFactor."
+            )
+
+        raw_no_mu_pt = raw_pt * (1.0 - muon_subtr)
+        l1 = float(self._evaluate(self.jes_l1_evaluator, jet, event, raw_no_mu_pt))
+        nominal_jec = float(
+            self._evaluate(self.jes_jec_evaluator, jet, event, raw_no_mu_pt)
+        )
+        if not math.isfinite(l1) or l1 <= 0.0:
+            raise RuntimeError(
+                f"Invalid L1 JEC factor {l1} for Type-1 jet "
+                f"(rawPt={raw_no_mu_pt}, eta={jet.eta})."
+            )
+        if not math.isfinite(nominal_jec) or nominal_jec <= 0.0:
+            raise RuntimeError(
+                f"Invalid nominal JEC factor {nominal_jec} for Type-1 jet "
+                f"(rawPt={raw_no_mu_pt}, eta={jet.eta})."
+            )
+
+        pt_l1 = raw_no_mu_pt * l1
+        pt_nominal = raw_no_mu_pt * nominal_jec
+        uncertainty = self._jes_uncertainty(jet, event, pt_nominal)
+        pt_varied = pt_nominal * (1.0 + self.jes_sign * uncertainty)
+        eligible = (
+            pt_varied > 15.0
+            and abs(jet.eta) < 5.2
+            and em_fraction < 0.9
+        )
+        return pt_l1, pt_varied, eligible
+
+    def _stored_jet_type1_pts(self, jet, event):
+        raw_factor = safe_get(jet, "rawFactor", None)
         ne_em = safe_get(jet, "neEmEF", None)
         ch_em = safe_get(jet, "chEmEF", None)
-        if None in (raw_factor, muon_subtr, ne_em, ch_em):
+        if None in (raw_factor, ne_em, ch_em):
             raise RuntimeError(
-                "Proper JES propagation to PUPPI MET requires Jet_rawFactor, "
-                "Jet_muonSubtrFactor, Jet_neEmEF, and Jet_chEmEF."
+                "Type-1 MET propagation requires Jet_rawFactor, Jet_neEmEF, "
+                "and Jet_chEmEF."
             )
-
         raw_pt = jet.pt * (1.0 - raw_factor)
-        corrected_no_mu_pt = jet.pt * (1.0 - muon_subtr)
-        muon_pt = raw_pt * muon_subtr
-        type1_pt = corrected_no_mu_pt + muon_pt
-        eligible = corrected_no_mu_pt > 15.0 and (ne_em + ch_em) < 0.9
-        return type1_pt, eligible
+        return self._type1_corrected_pts(jet, event, raw_pt, ne_em + ch_em)
 
-    def _low_pt_jet_type1_pt(self, jet, event):
-        """Reconstruct a low-pT Type-1 jet with the configured nominal JEC."""
+    def _low_pt_jet_type1_pts(self, jet, event):
         raw_pt = safe_get(jet, "rawPt", None)
-        muon_subtr = safe_get(jet, "muonSubtrFactor", None)
-        if raw_pt is None or muon_subtr is None:
+        if raw_pt is None:
             raise RuntimeError(
-                "Proper JES propagation to PUPPI MET requires "
-                "CorrT1METJet_rawPt and CorrT1METJet_muonSubtrFactor."
+                "Type-1 MET propagation requires CorrT1METJet_rawPt."
             )
-
-        jec = float(self._evaluate(self.jes_jec_evaluator, jet, event, raw_pt))
-        if not math.isfinite(jec) or jec <= 0.0:
-            raise RuntimeError(
-                f"Invalid nominal JEC factor {jec} for CorrT1METJet "
-                f"(rawPt={raw_pt}, eta={jet.eta})."
-            )
-
-        corrected_no_mu_pt = raw_pt * (1.0 - muon_subtr) * jec
-        muon_pt = raw_pt * muon_subtr
-        type1_pt = corrected_no_mu_pt + muon_pt
-        return type1_pt, corrected_no_mu_pt > 15.0
+        # CorrT1METJet does not store electromagnetic fractions in NanoAOD.
+        return self._type1_corrected_pts(jet, event, raw_pt, 0.0)
 
     def _propagate_jes_to_puppi_met(self, event, jets):
-        """Propagate the JES delta from all Type-1 jets to nominal PUPPI MET."""
+        """Recompute Type-1 PUPPI MET for the selected JES variation.
+
+        The CMS JERC prescription starts from RawPuppiMET and subtracts
+        sum[(pT_varied - pT_L1) * (cos(phi), sin(phi))] for all eligible
+        Jet and CorrT1METJet objects.
+        """
         met_pt = safe_get(event, "PuppiMET_pt", None)
         met_phi = safe_get(event, "PuppiMET_phi", None)
         if met_pt is None or met_phi is None:
@@ -335,14 +392,21 @@ class AsymmetryModule(Module):
         if not self.has_jes_shift:
             return met_pt, met_phi
 
-        met_px = met_pt * math.cos(met_phi)
-        met_py = met_pt * math.sin(met_phi)
+        raw_met_pt = safe_get(event, "RawPuppiMET_pt", None)
+        raw_met_phi = safe_get(event, "RawPuppiMET_phi", None)
+        if raw_met_pt is None or raw_met_phi is None:
+            raise RuntimeError(
+                "Non-nominal JES passes require RawPuppiMET_pt/phi."
+            )
+        met_px = raw_met_pt * math.cos(raw_met_phi)
+        met_py = raw_met_pt * math.sin(raw_met_phi)
 
-        type1_jets = []
         for jet in jets:
-            type1_pt, eligible = self._stored_jet_type1_pt(jet)
+            pt_l1, pt_varied, eligible = self._stored_jet_type1_pts(jet, event)
             if eligible:
-                type1_jets.append((jet, type1_pt))
+                delta_pt = pt_varied - pt_l1
+                met_px -= delta_pt * math.cos(jet.phi)
+                met_py -= delta_pt * math.sin(jet.phi)
 
         n_low_pt = safe_get(event, "nCorrT1METJet", None)
         if n_low_pt is None:
@@ -351,15 +415,11 @@ class AsymmetryModule(Module):
                 "CorrT1METJet_* for non-nominal JES production."
             )
         for jet in Collection(event, "CorrT1METJet"):
-            type1_pt, eligible = self._low_pt_jet_type1_pt(jet, event)
+            pt_l1, pt_varied, eligible = self._low_pt_jet_type1_pts(jet, event)
             if eligible:
-                type1_jets.append((jet, type1_pt))
-
-        for jet, type1_pt in type1_jets:
-            uncertainty = self._jes_uncertainty(jet, event, type1_pt)
-            delta_pt = self.jes_sign * uncertainty * type1_pt
-            met_px -= delta_pt * math.cos(jet.phi)
-            met_py -= delta_pt * math.sin(jet.phi)
+                delta_pt = pt_varied - pt_l1
+                met_px -= delta_pt * math.cos(jet.phi)
+                met_py -= delta_pt * math.sin(jet.phi)
 
         return math.hypot(met_px, met_py), math.atan2(met_py, met_px)
 
@@ -395,8 +455,11 @@ class AsymmetryModule(Module):
         self.out.branch("nano_lep_eta", "F", lenVar="nano_nLeptons")
         self.out.branch("nano_lep_phi", "F", lenVar="nano_nLeptons")
         self.out.branch("nano_lep_charge", "I", lenVar="nano_nLeptons")
-        self.out.branch("nano_lep_ntrk05", "I", lenVar="nano_nLeptons") 
+        self.out.branch("nano_lep_ntrk05", "I", lenVar="nano_nLeptons")
         self.out.branch("nano_lep_ntrk09", "I", lenVar="nano_nLeptons")
+        self.out.branch("nano_isWCR", "O")
+        self.out.branch("nano_isWMuon", "O")
+        self.out.branch("nano_isWElectron", "O")
         self.out.branch("nano_w_mT", "F")
         self.out.branch("nano_w_pt", "F")
         self.out.branch("nano_w_phi", "F")
@@ -489,6 +552,8 @@ class AsymmetryModule(Module):
         
         # W+jets: Exactly 1 tight lepton, AND exactly 1 loose lepton (vetoes events with a 2nd loose lepton)
         is_WCR = (len(tight_leps) == 1 and len(loose_leps) == 1)
+        is_WMuon = is_WCR and abs(tight_leps[0].pdgId) == 13
+        is_WElectron = is_WCR and abs(tight_leps[0].pdgId) == 11
         
         # MJ Control Region: >= 2 isolated jets, strictly 0 loose leptons
         is_mj = (len(sel_jets) >= 2 and sel_jets[0].pt > 140.0)
@@ -546,19 +611,22 @@ class AsymmetryModule(Module):
             v_all += leptons_to_save[0].p4()
             v_all += leptons_to_save[1].p4()
             
-        if len(leptons_to_save) >= 1 and (self.channel in ["mu", "el"] and is_WCR):
+        if is_WCR and self.channel in ["mu", "el", "zb"]:
+            w_lep = tight_leps[0]
             met_pt = analysis_met_pt
             met_phi = analysis_met_phi
-            dphi = ROOT.TVector2.Phi_mpi_pi(leptons_to_save[0].phi - met_phi)
-            w_mT = math.sqrt(2 * leptons_to_save[0].pt * met_pt * (1 - math.cos(dphi)))
-            
-            w_vec = ROOT.TVector2(leptons_to_save[0].pt * math.cos(leptons_to_save[0].phi) + met_pt * math.cos(met_phi),
-                                  leptons_to_save[0].pt * math.sin(leptons_to_save[0].phi) + met_pt * math.sin(met_phi))
+            dphi = ROOT.TVector2.Phi_mpi_pi(w_lep.phi - met_phi)
+            w_mT = math.sqrt(2 * w_lep.pt * met_pt * (1 - math.cos(dphi)))
+
+            w_vec = ROOT.TVector2(
+                w_lep.pt * math.cos(w_lep.phi) + met_pt * math.cos(met_phi),
+                w_lep.pt * math.sin(w_lep.phi) + met_pt * math.sin(met_phi),
+            )
             w_pt, w_phi = w_vec.Mod(), w_vec.Phi()
-            
+
             # Full reconstruction using W mass constraint
             lep_p4 = ROOT.TLorentzVector()
-            lep_p4.SetPtEtaPhiM(leptons_to_save[0].pt, leptons_to_save[0].eta, leptons_to_save[0].phi, leptons_to_save[0].mass)            
+            lep_p4.SetPtEtaPhiM(w_lep.pt, w_lep.eta, w_lep.phi, w_lep.mass)
             nu_p4 = get_nu_p4(lep_p4, met_pt, met_phi)
             w_p4 = lep_p4 + nu_p4
             w_pt, w_phi, w_m = w_p4.Pt(), w_p4.Phi(), w_p4.M()
@@ -643,6 +711,9 @@ class AsymmetryModule(Module):
         self.out.fillBranch("nano_lep_charge", [l.charge for l in leptons_to_save])
         self.out.fillBranch("nano_lep_ntrk05", lep_trk05)
         self.out.fillBranch("nano_lep_ntrk09", lep_trk09)
+        self.out.fillBranch("nano_isWCR", is_WCR)
+        self.out.fillBranch("nano_isWMuon", is_WMuon)
+        self.out.fillBranch("nano_isWElectron", is_WElectron)
         self.out.fillBranch("nano_mll", mll)
         self.out.fillBranch("nano_yll", yll)
         self.out.fillBranch("nano_ptll", ptll)
