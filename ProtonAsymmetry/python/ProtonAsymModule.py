@@ -334,7 +334,10 @@ class AsymmetryModule(Module):
                 raise RuntimeError(
                     "Correction requires the run number, but the branch is missing."
                 )
-            return int(run)
+            # Some JME payloads bin the run number as a correctionlib `real`
+            # even though NanoAOD stores it as an integer. correctionlib 2.7
+            # enforces the declared type and does not promote int to real.
+            return float(run) if input_type == "real" else int(run)
 
         raise RuntimeError(
             f"Do not know how to provide correction input '{name}'."
